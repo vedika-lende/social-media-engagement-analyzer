@@ -1,0 +1,107 @@
+const $ = id => document.getElementById(id);
+let currentData = null;
+const palette = ["#5367e8", "#21b88a", "#f2a64a", "#d96a8a", "#8b6bd9", "#3fa8c5", "#a0ad45", "#d47c4e", "#75849b", "#ba6ac2"];
+
+async function api(url, options={}) {
+  const res = await fetch(url, options);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "Something went wrong.");
+  return body;
+}
+function showNotice(message, type="") {
+  $("notice").textContent = message;
+  $("notice").className = "notice" + (type ? " " + type : "");
+}
+function esc(v) {
+  return String(v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function featuresUI(features, selected) {
+  const box = $("featureList"); box.innerHTML = "";
+  if (!features.length) { box.textContent = "No numeric columns found."; return; }
+  features.forEach(name => {
+    const label = document.createElement("label"); label.className = "feature-option";
+    const input = document.createElement("input"); input.type = "checkbox"; input.value = name; input.checked = selected.includes(name);
+    const span = document.createElement("span"); span.textContent = name;
+    label.append(input, span); box.append(label);
+  });
+  $("totalFeatures").textContent = selected.length;
+  box.onchange = () => $("totalFeatures").textContent = box.querySelectorAll("input:checked").length;
+}
+function previewUI(d) {
+  $("previewTag").textContent = `${d.rows} rows · ${d.columns} fields`;
+  $("previewHead").innerHTML = "<tr>"+d.column_names.map(c=>`<th>${esc(c)}</th>`).join("")+"</tr>";
+  $("previewBody").innerHTML = d.preview.map(row=>"<tr>"+d.column_names.map(c=>`<td>${esc(row[c] == null ? "—" : row[c])}</td>`).join("")+"</tr>").join("");
+}
+function setDataset(d) {
+  currentData=d;
+  $("totalRows").textContent = Number(d.rows).toLocaleString();
+  $("totalCols").textContent = d.columns;
+  $("datasetMessage").textContent = `Loaded dataset · ${Number(d.rows).toLocaleString()} records available`;
+  featuresUI(d.numeric_features, d.suggested_features);
+  previewUI(d);
+}
+async function loadDataset() {
+  try { const d=await api("/api/data"); setDataset(d); showNotice("Dataset loaded. Select metrics and run the analysis."); }
+  catch(e) { showNotice(e.message, "error"); }
+}
+$("uploadForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const file=$("csvFile").files[0]; if(!file) return;
+  const fd=new FormData(); fd.append("file",file);
+  try { const d=await api("/api/data",{method:"POST",body:fd}); setDataset(d); showNotice(`Successfully uploaded ${file.name}.`,"success"); }
+  catch(err) { showNotice(err.message,"error"); }
+});
+$("runBtn").addEventListener("click", async () => {
+  const features=[...document.querySelectorAll("#featureList input:checked")].map(x=>x.value);
+  $("runBtn").disabled=true; $("runBtn").textContent="Analysing…";
+  try {
+    const d=await api("/api/cluster",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({k:Number($("kValue").value),features})});
+    $("totalClusters").textContent=d.k;
+    const groups={};
+    d.scatter.forEach(p=>{ if(!groups[p.cluster]) groups[p.cluster]={x:[],y:[]}; groups[p.cluster].x.push(p.x); groups[p.cluster].y.push(p.y); });
+    const scatter=Object.keys(groups).map(key=>({
+      x:groups[key].x, y:groups[key].y, name:`Cluster ${key}`,
+      mode:"markers", type:"scattergl",
+      marker:{size:7,opacity:.78,color:palette[Number(key)%palette.length],line:{width:.5,color:"#ffffff"}},
+      hovertemplate:`Cluster ${key}<br>Component 1: %{x:.2f}<br>Component 2: %{y:.2f}<extra></extra>`
+    }));
+    const scatterEl=$("scatterPlot"), barEl=$("barPlot");
+    scatterEl.classList.remove("empty"); barEl.classList.remove("empty");
+    const plotFont={family:"DM Sans, sans-serif",size:13,color:"#35445d"};
+    const axisStyle={gridcolor:"#e5eaf2",linecolor:"#cbd5e3",zerolinecolor:"#d8e0eb",tickfont:{size:12,color:"#52627a"},titlefont:{size:13,color:"#35445d"}};
+    Plotly.newPlot(scatterEl,scatter,{
+      autosize:true,height:350,margin:{l:58,r:18,t:16,b:76},
+      paper_bgcolor:"#ffffff",plot_bgcolor:"#ffffff",font:plotFont,
+      xaxis:{...axisStyle,title:{text:"PCA component 1",standoff:10},automargin:true},
+      yaxis:{...axisStyle,title:{text:"PCA component 2",standoff:10},automargin:true},
+      legend:{orientation:"h",x:0,y:-0.25,font:{size:12},bgcolor:"rgba(255,255,255,.9)"},
+      hoverlabel:{bgcolor:"#172642",font:{color:"#ffffff",size:12}}
+    },{responsive:true,displayModeBar:false,scrollZoom:false});
+    Plotly.newPlot(barEl,[{
+      x:d.counts.map(x=>`Cluster ${x.cluster}`),y:d.counts.map(x=>x.count),type:"bar",
+      marker:{color:d.counts.map(x=>palette[x.cluster%palette.length]),line:{color:"#ffffff",width:1}},
+      text:d.counts.map(x=>Number(x.count).toLocaleString()),textposition:"outside",cliponaxis:false,
+      textfont:{size:12,color:"#35445d"},hovertemplate:"%{x}<br>%{y:,} posts<extra></extra>"
+    }],{
+      autosize:true,height:350,margin:{l:68,r:24,t:32,b:58},
+      paper_bgcolor:"#ffffff",plot_bgcolor:"#ffffff",font:plotFont,
+      xaxis:{...axisStyle,automargin:true},
+      yaxis:{...axisStyle,title:{text:"Number of posts",standoff:10},rangemode:"tozero",automargin:true},
+      bargap:.38,hoverlabel:{bgcolor:"#172642",font:{color:"#ffffff",size:12}}
+    },{responsive:true,displayModeBar:false});
+    requestAnimationFrame(()=>{Plotly.Plots.resize(scatterEl);Plotly.Plots.resize(barEl);});
+    $("summaryHead").innerHTML="<tr><th>Cluster</th><th>Posts</th>"+d.features.map(f=>`<th>Avg. ${esc(f)}</th>`).join("")+"</tr>";
+    $("summaryBody").innerHTML=d.summary.map(s=>`<tr><td><span class="cluster-pill">Cluster ${s.cluster}</span></td><td><b>${s.count}</b></td>`+d.features.map(f=>`<td>${s.means[f]==null?"—":Number(s.means[f]).toLocaleString(undefined,{maximumFractionDigits:2})}</td>`).join("")+"</tr>").join("");
+    showNotice(`Analysis complete: ${Number(d.rows).toLocaleString()} posts grouped into ${d.k} clusters.`,"success");
+  } catch(err) { showNotice(err.message,"error"); }
+  finally { $("runBtn").disabled=false; $("runBtn").innerHTML='Run analysis <span>↗</span>'; }
+});
+$("downloadBtn").addEventListener("click", async () => {
+  try {
+    const r=await fetch("/api/download");
+    if(!r.ok){const j=await r.json();throw new Error(j.error||"Download failed.");}
+    const url=URL.createObjectURL(await r.blob()); const a=document.createElement("a");
+    a.href=url;a.download="facebook_posts_with_clusters.csv";a.click();URL.revokeObjectURL(url);
+  } catch(e){showNotice(e.message,"error");}
+});
+loadDataset();
